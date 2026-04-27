@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
@@ -12,16 +13,17 @@ from PIL import Image
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from .db import MEDIA_DIR, PDF_DIR, get_connection
+from .db import DEFAULT_CRAWL_WINDOW_DAYS, MEDIA_DIR, PDF_DIR, get_connection
 
 
 SOURCE_BASE_URL = "https://shitspace.xyz"
 LIST_ENDPOINT = f"{SOURCE_BASE_URL}/api/articles/"
+# shitspace.xyz/realshit 页面使用的列表参数（与源站前端一致）
+REALSHIT_LIST_QUERY: dict[str, str] = {"tag": "hardcore"}
 DETAIL_ENDPOINT = f"{SOURCE_BASE_URL}/api/articles/{{article_id}}"
 COMMENTS_ENDPOINT = f"{SOURCE_BASE_URL}/api/articles/{{article_id}}/comments"
 DEFAULT_TIMEOUT = 30
 DEFAULT_RENDER_SCALE = 3.0
-DEFAULT_CRAWL_WINDOW_DAYS = 5
 COMMENTS_PAGE_SIZE = 100
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -78,8 +80,20 @@ def _parse_json(response: requests.Response) -> Any:
     return response.json()
 
 
-def fetch_article_page(session: requests.Session, page: int) -> dict[str, Any]:
-    response = session.get(LIST_ENDPOINT, params={"page": page}, timeout=DEFAULT_TIMEOUT)
+def fetch_article_page(
+    session: requests.Session,
+    page: int,
+    extra_params: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """源站列表接口；extra_params 如 {'tag': 'hardcore'} 对应 /realshit 页面数据。"""
+    params: dict[str, Any] = {"page": page, "page_size": 10}
+    if extra_params:
+        params.update(extra_params)
+    response = session.get(
+        LIST_ENDPOINT,
+        params=params,
+        timeout=DEFAULT_TIMEOUT,
+    )
     return _parse_json(response)
 
 
@@ -176,6 +190,9 @@ def article_needs_regeneration(
     if int(existing.get("page_count") or 0) <= 0:
         return True
 
+    if (existing.get("title") or "") != (list_item.get("title") or ""):
+        return True
+
     return existing.get("source_updated_at") != list_item.get("updated_at")
 
 
@@ -197,20 +214,74 @@ def render_pdf_to_images(
     return images
 
 
-def build_pdf_from_images(article_id: str, images: list[Image.Image]) -> str | None:
-    if not images:
-        return None
-
-    PDF_DIR.mkdir(parents=True, exist_ok=True)
-    output_path = PDF_DIR / f"{article_id}.pdf"
-    first, rest = images[0], images[1:]
-    first.save(output_path, save_all=True, append_images=rest)
-    return str(output_path.relative_to(MEDIA_DIR)).replace("\\", "/")
-
-
 def close_images(images: list[Image.Image]) -> None:
     for image in images:
         image.close()
+
+
+_WINDOWS_RESERVED_STEM = re.compile(
+    r"^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\..*)?$",
+    re.IGNORECASE,
+)
+
+
+def sanitize_title_for_pdf_filename(title: str, max_stem_length: int = 120) -> str:
+    """Strip characters invalid in file names; keep extension out of stem."""
+    raw = (title or "").strip()
+    if not raw:
+        return "untitled"
+    stem = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "-", raw)
+    stem = re.sub(r"\s+", " ", stem).strip(" .")
+    if not stem:
+        stem = "untitled"
+    if _WINDOWS_RESERVED_STEM.match(stem):
+        stem = f"_{stem}"
+    if len(stem) > max_stem_length:
+        stem = stem[:max_stem_length].rstrip(" .")
+    return stem or "untitled"
+
+
+def _next_available_pdf_path(stem: str) -> Path:
+    n = 2
+    while True:
+        candidate = PDF_DIR / f"{stem} ({n}).pdf"
+        if not candidate.exists():
+            return candidate
+        n += 1
+
+
+def build_pdf_from_images(
+    title: str,
+    images: list[Image.Image],
+    previous_relative: str | None = None,
+) -> str | None:
+    if not images:
+        return None
+
+    stem = sanitize_title_for_pdf_filename(title)
+    PDF_DIR.mkdir(parents=True, exist_ok=True)
+    prev_abs: Path | None = None
+    pdf_root = PDF_DIR.resolve()
+    if previous_relative:
+        prev_abs = (MEDIA_DIR / previous_relative).resolve()
+        if not prev_abs.is_relative_to(pdf_root) or prev_abs.suffix.lower() != ".pdf":
+            prev_abs = None
+
+    if (
+        prev_abs is not None
+        and prev_abs.stem == stem
+    ):
+        output_path = prev_abs
+    else:
+        primary = PDF_DIR / f"{stem}.pdf"
+        if not primary.exists():
+            output_path = primary
+        else:
+            output_path = _next_available_pdf_path(stem)
+
+    first, rest = images[0], images[1:]
+    first.save(output_path, save_all=True, append_images=rest)
+    return str(output_path.relative_to(MEDIA_DIR.resolve())).replace("\\", "/")
 
 
 def upsert_article(
@@ -366,14 +437,13 @@ def prune_old_articles_and_pdfs(cutoff_at: datetime) -> tuple[int, int]:
     for row in rows:
         deleted_pdfs += int(delete_generated_pdf(row["generated_pdf_path"]))
 
-    cutoff_timestamp = cutoff_at.timestamp()
+    # Drop any PDF on disk that no row still references (same retention window as articles).
     for pdf_file in PDF_DIR.glob("*.pdf"):
         relative_path = str(pdf_file.relative_to(MEDIA_DIR)).replace("\\", "/")
         if relative_path in referenced_pdf_paths:
             continue
-        if pdf_file.stat().st_mtime < cutoff_timestamp:
-            pdf_file.unlink(missing_ok=True)
-            deleted_pdfs += 1
+        pdf_file.unlink(missing_ok=True)
+        deleted_pdfs += 1
 
     return len(rows), deleted_pdfs
 
@@ -382,62 +452,92 @@ def crawl_articles(
     max_pages: int | None = None,
     render_scale: float = DEFAULT_RENDER_SCALE,
     crawl_window_days: int = DEFAULT_CRAWL_WINDOW_DAYS,
+    list_queries: list[dict[str, Any]] | None = None,
 ) -> CrawlResult:
+    """
+    拉取源站文章列表并入库。list_queries 为多次列表请求（参数合并进 page/page_size），
+    默认先无筛选（发酵区总榜），再带 tag=hardcore（与 shitspace.xyz/realshit 同源），
+    避免严谨论证稿件在未筛选列表中排序靠后时爬不到。同一 sync 内已处理过的 id 会跳过。
+    """
     now = datetime.now(timezone.utc)
     cutoff_at = now - timedelta(days=crawl_window_days)
     crawled_at = isoformat_utc(now)
     existing_articles = load_existing_articles()
+    queries = list_queries if list_queries is not None else [{}]
+
+    meta_first: dict[str, Any] | None = None
+    requested_pages_first = 1
+    fetched_pages = 0
+    fetched_articles = 0
+    saved_articles = 0
+    regenerated_articles = 0
+    rendered_pages = 0
+    generated_pdfs = 0
+    saved_comments = 0
+    processed_ids: set[str] = set()
 
     with _session() as session:
-        first_page_payload = fetch_article_page(session, 1)
-        source_total_count = int(first_page_payload.get("count", 0))
-        source_total_pages = int(first_page_payload.get("total_pages", 1))
-        page_limit = min(max_pages or source_total_pages, source_total_pages)
+        for qidx, extra in enumerate(queries):
+            first_page_payload = fetch_article_page(session, 1, extra)
+            if qidx == 0:
+                meta_first = first_page_payload
 
-        pages: list[list[dict[str, Any]]] = []
-        fetched_pages = 0
+            source_total_pages = max(int(first_page_payload.get("total_pages", 1)), 1)
+            page_limit = min(max_pages or source_total_pages, source_total_pages)
+            if qidx == 0:
+                requested_pages_first = page_limit
 
-        for page_number in range(1, page_limit + 1):
-            payload = first_page_payload if page_number == 1 else fetch_article_page(session, page_number)
-            page_items = payload.get("data", [])
-            fetched_pages += 1
+            pages: list[list[dict[str, Any]]] = []
 
-            recent_items = [item for item in page_items if is_recent_article(item, cutoff_at)]
-            if recent_items:
-                pages.append(recent_items)
+            for page_number in range(1, page_limit + 1):
+                payload = (
+                    first_page_payload
+                    if page_number == 1
+                    else fetch_article_page(session, page_number, extra)
+                )
+                page_items = payload.get("data", [])
+                fetched_pages += 1
 
-            if not page_items or len(recent_items) != len(page_items):
-                break
+                recent_items = [item for item in page_items if is_recent_article(item, cutoff_at)]
+                if recent_items:
+                    pages.append(recent_items)
 
-        fetched_articles = sum(len(items) for items in pages)
-        saved_articles = 0
-        regenerated_articles = 0
-        rendered_pages = 0
-        generated_pdfs = 0
-        saved_comments = 0
+                if not page_items or len(recent_items) != len(page_items):
+                    break
 
-        for items in pages:
-            for item in items:
-                try:
-                    saved, regenerated, page_count, generated, comment_total = _process_article(
-                        session=session,
-                        list_item=item,
-                        existing=existing_articles.get(item["id"]),
-                        crawled_at=crawled_at,
-                        render_scale=render_scale,
-                    )
-                except Exception:
-                    continue
-                saved_articles += saved
-                regenerated_articles += regenerated
-                rendered_pages += page_count
-                generated_pdfs += generated
-                saved_comments += comment_total
+            fetched_articles += sum(len(items) for items in pages)
+
+            for items in pages:
+                for item in items:
+                    aid = item.get("id")
+                    if not aid or aid in processed_ids:
+                        continue
+                    processed_ids.add(aid)
+                    try:
+                        saved, regenerated, page_count, generated, comment_total = _process_article(
+                            session=session,
+                            list_item=item,
+                            existing=existing_articles.get(aid),
+                            crawled_at=crawled_at,
+                            render_scale=render_scale,
+                        )
+                    except Exception:
+                        continue
+                    saved_articles += saved
+                    regenerated_articles += regenerated
+                    rendered_pages += page_count
+                    generated_pdfs += generated
+                    saved_comments += comment_total
 
     pruned_articles, deleted_pdfs = prune_old_articles_and_pdfs(cutoff_at)
 
+    if meta_first is None:
+        meta_first = {"count": 0, "total_pages": 1}
+    source_total_count = int(meta_first.get("count", 0))
+    source_total_pages = max(int(meta_first.get("total_pages", 1)), 1)
+
     return CrawlResult(
-        requested_pages=page_limit,
+        requested_pages=requested_pages_first,
         fetched_pages=fetched_pages,
         fetched_articles=fetched_articles,
         saved_articles=saved_articles,
@@ -465,6 +565,7 @@ def _process_article(
     author = list_item.get("author") or {}
     page_count = int(existing.get("page_count") or 0) if existing else 0
     generated_pdf_path = existing.get("generated_pdf_path") if existing else None
+    prior_pdf = generated_pdf_path
     regenerated = 0
     generated = 0
     detail: dict[str, Any] | None = None
@@ -476,7 +577,15 @@ def _process_article(
             images = render_pdf_to_images(pdf_bytes, render_scale)
             try:
                 page_count = len(images)
-                generated_pdf_path = build_pdf_from_images(detail["id"], images)
+                pdf_title = (detail.get("title") or list_item.get("title") or "").strip()
+                new_path = build_pdf_from_images(
+                    pdf_title,
+                    images,
+                    previous_relative=prior_pdf,
+                )
+                if new_path and prior_pdf and new_path != prior_pdf:
+                    delete_generated_pdf(prior_pdf)
+                generated_pdf_path = new_path
                 regenerated = 1
                 generated = 1 if generated_pdf_path else 0
             finally:

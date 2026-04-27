@@ -13,11 +13,10 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from .db import get_connection
+from .db import DEFAULT_CONTENT_CRAWL_WINDOW_DAYS, get_connection
 
 SOURCE_BASE_URL = "https://shitspace.xyz"
 DEFAULT_TIMEOUT = 30
-DEFAULT_CRAWL_WINDOW_DAYS = 7
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -66,10 +65,38 @@ def _parse_json(response: requests.Response) -> Any:
     return response.json()
 
 
+def _detail_entity(detail: dict[str, Any]) -> dict[str, Any]:
+    """源站详情多为扁平 JSON；若存在 data 对象则使用之（兼容两种形态）。"""
+    inner = detail.get("data")
+    if isinstance(inner, dict):
+        return inner
+    return detail
+
+
+def _is_recent_content_list_item(item: dict[str, Any], cutoff_at: datetime) -> bool:
+    """与文章列表相同的「窗口」语义：无日期或解析失败则保留。"""
+    item_date = item.get("created_at") or item.get("updated_at")
+    if not item_date:
+        return True
+    try:
+        item_datetime = datetime.fromisoformat(item_date.replace("Z", "+00:00"))
+        if item_datetime.tzinfo is None:
+            item_datetime = item_datetime.replace(tzinfo=timezone.utc)
+        else:
+            item_datetime = item_datetime.astimezone(timezone.utc)
+        return item_datetime >= cutoff_at
+    except ValueError:
+        return True
+
+
 def fetch_content_list(session: requests.Session, content_type: str, page: int = 1) -> dict[str, Any]:
     """获取内容列表"""
     endpoint = f"{SOURCE_BASE_URL}{CONTENT_TYPES[content_type]}"
-    response = session.get(endpoint, params={"page": page}, timeout=DEFAULT_TIMEOUT)
+    response = session.get(
+        endpoint,
+        params={"page": page, "page_size": 10},
+        timeout=DEFAULT_TIMEOUT,
+    )
     return _parse_json(response)
 
 
@@ -220,46 +247,60 @@ def replace_content_comments(
     return len(comments)
 
 
+def prune_old_contents(cutoff_at: datetime) -> int:
+    """删除超出保留窗口的 contents（news/questions 等）及关联评论（外键 CASCADE）。"""
+    cutoff_value = cutoff_at.astimezone(timezone.utc).isoformat()
+    with get_connection() as connection:
+        rows = connection.execute(
+            """
+            SELECT id FROM contents
+            WHERE datetime(COALESCE(created_at, updated_at)) < datetime(?)
+            """,
+            [cutoff_value],
+        ).fetchall()
+        if rows:
+            connection.executemany(
+                "DELETE FROM contents WHERE id = ?",
+                [(row["id"],) for row in rows],
+            )
+    return len(rows)
+
+
 def crawl_content_type(
     content_type: str,
     max_pages: int | None = None,
-    crawl_window_days: int = DEFAULT_CRAWL_WINDOW_DAYS,
+    crawl_window_days: int = DEFAULT_CONTENT_CRAWL_WINDOW_DAYS,
 ) -> ContentCrawlResult:
     """爬取指定类型的内容"""
     now = datetime.now(timezone.utc)
     cutoff_at = now - timedelta(days=crawl_window_days)
-    crawled_at = now.isoformat()
-    
+    crawled_at = now.astimezone(timezone.utc).isoformat()
+
     with _session() as session:
         # 获取第一页
         first_page = fetch_content_list(session, content_type, 1)
         total_pages = max(int(first_page.get("total_pages") or 1), 1)
         page_limit = min(max_pages or total_pages, total_pages)
-        
-        all_items = []
+
+        all_items: list[dict[str, Any]] = []
         fetched_pages = 0
-        
+
         for page_num in range(1, page_limit + 1):
             if page_num == 1:
                 page_data = first_page
             else:
                 page_data = fetch_content_list(session, content_type, page_num)
-            
+
             items = page_data.get("data", [])
             fetched_pages += 1
-            
-            # 过滤近期内容
-            for item in items:
-                item_date = item.get("created_at") or item.get("updated_at")
-                if item_date:
-                    try:
-                        item_datetime = datetime.fromisoformat(item_date.replace("Z", "+00:00"))
-                        if item_datetime >= cutoff_at:
-                            all_items.append(item)
-                    except ValueError:
-                        all_items.append(item)  # 日期解析失败也保留
-                else:
-                    all_items.append(item)
+
+            recent_items = [item for item in items if _is_recent_content_list_item(item, cutoff_at)]
+            if recent_items:
+                all_items.extend(recent_items)
+
+            # 列表按时间倒序时，整页出现窗口外条目则后续页更旧，与文章爬取一致提前结束
+            if not items or len(recent_items) != len(items):
+                break
         
         # 保存内容和评论
         saved_items = 0
@@ -271,10 +312,10 @@ def crawl_content_type(
                 if not content_id:
                     continue
                 
-                # 获取详情（如果有更多字段）
+                # 获取详情（正文等字段仅在详情接口中完整）
                 try:
                     detail = fetch_content_detail(session, content_type, content_id)
-                    item.update(detail.get("data", {}))
+                    item.update(_detail_entity(detail))
                 except Exception:
                     pass  # 使用列表中的数据
                 
@@ -330,7 +371,7 @@ def crawl_content_type(
 
 def crawl_all_content(
     max_pages: int | None = None,
-    crawl_window_days: int = DEFAULT_CRAWL_WINDOW_DAYS,
+    crawl_window_days: int = DEFAULT_CONTENT_CRAWL_WINDOW_DAYS,
 ) -> dict[str, ContentCrawlResult]:
     """爬取所有内容类型"""
     results = {}

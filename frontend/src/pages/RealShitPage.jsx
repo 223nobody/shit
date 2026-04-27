@@ -3,6 +3,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Clock3,
+  ExternalLink,
   FileImage,
   Megaphone,
   Menu,
@@ -10,23 +11,14 @@ import {
   RefreshCcw,
   Search,
   Sparkles,
-  Download,
+  Star,
 } from 'lucide-react'
 import { Link, useLocation } from 'react-router-dom'
 import { ArticleDetailModal } from '../components/ArticleDetailModal'
 import '../App.css'
 
-const zoneOptions = [
-  { value: '', label: '全部专区' },
-  { value: 'latrine', label: '发酵区' },
-  { value: 'published', label: '已发表' },
-]
-
-const tagOptions = [
-  { value: '', label: '全部标签' },
-  { value: 'meme', label: '欢乐鉴语' },
-  { value: 'hardcore', label: '严谨论证' },
-]
+/** 与源站 /realshit 同源列表语义（后端 GET /api/realshit → tag=hardcore） */
+const TAG_LABEL = '严谨论证'
 
 const disciplineLabels = {
   interdisciplinary: '交叉学科',
@@ -36,11 +28,16 @@ const disciplineLabels = {
   law: '法学',
   literature: '文学',
   engineering: '工程学',
+  medicine: '医学',
 }
 
+/** 源站 zones：latrine / septic / sediment / stone */
 const zoneLabels = {
-  latrine: 'Fermentation / 发酵区',
-  published: 'Published / 已发表',
+  latrine: '发酵区',
+  septic: '化腐区',
+  sediment: '沉定区',
+  stone: '构石区',
+  published: '已发表',
 }
 
 function formatDate(value) {
@@ -72,81 +69,83 @@ function formatClock(date) {
   }).format(date)
 }
 
-function scoreLabel(score) {
-  if (score >= 4.5) return '高分'
-  if (score >= 3.5) return '稳定'
-  if (score > 0) return '待观察'
-  return '未评分'
+function authorDisplayName(article) {
+  if (article.author && typeof article.author === 'object') {
+    return article.author.display_name || '匿名作者'
+  }
+  return article.author_name || '匿名作者'
 }
 
-function ArticleCard({ article, onSelect }) {
+function zoneKey(article) {
+  return article.zones || article.zone || ''
+}
+
+function RealShitRow({ article, onSelect, zoneLabel, disciplineLabel }) {
   const score = Number(article.avg_score || 0)
-  const scorePercent = Math.max(0, Math.min((score / 5) * 100, 100))
+  const ratings = Number(article.rating_count || 0)
+  const comments = Number(article.comment_count || 0)
+  const sourceArticleUrl = `https://shitspace.xyz/articles/${article.id}`
 
   return (
-    <article className="article-card">
-      <button type="button" className="article-card__button" onClick={() => onSelect(article.id)}>
-        <div className="article-card__visual">
+    <div className="realshit-feed__row-wrap">
+      <button
+        type="button"
+        className="realshit-feed__row"
+        onClick={() => onSelect(article.id)}
+      >
+        <div className="realshit-feed__thumb">
           {article.cover_image_url ? (
             <img src={article.cover_image_url} alt="" />
           ) : (
-            <div className="article-card__visual-fallback">
-              <FileImage size={32} />
+            <div className="realshit-feed__thumb-fallback">
+              <FileImage size={28} />
             </div>
           )}
         </div>
-
-        <div className="article-card__content">
-          <div className="article-card__top">
-            <div className="article-card__headline">
-              <span className="article-card__eyebrow">
-                {tagOptions.find((item) => item.value === article.tag)?.label || article.tag || '未分类'}
-              </span>
-              <h3>{article.title}</h3>
-            </div>
-            <div className="article-card__score">
-              <span className="score-track">
-                <span className="score-track__fill" style={{ width: `${scorePercent}%` }} />
-              </span>
-              <strong>{score.toFixed(1)}</strong>
-              <span>{scoreLabel(score)}</span>
-            </div>
+        <div className="realshit-feed__body">
+          <span className="realshit-feed__kicker">{TAG_LABEL}</span>
+          <h2 className="realshit-feed__title">{article.title}</h2>
+          <div className="realshit-feed__stats">
+            <span className="realshit-feed__stat" title="均分（源站 avg_score）">
+              <Star size={13} aria-hidden />
+              {score > 0 ? score.toFixed(2) : '—'}
+            </span>
+            <span className="realshit-feed__stat" title="评分条数">
+              {ratings} 评分
+            </span>
+            <span className="realshit-feed__stat">
+              <MessageCircle size={13} aria-hidden />
+              {comments} 评论
+            </span>
           </div>
-
-          <div className="article-card__meta">
-            <span>{article.author_name || '匿名作者'}</span>
-            <span>{disciplineLabels[article.discipline] || article.discipline || '未标注'}</span>
+          <div className="realshit-feed__meta">
+            <span>{authorDisplayName(article)}</span>
+            <span>{disciplineLabel}</span>
+            <span>{zoneLabel}</span>
             <span>{formatDate(article.approved_at || article.created_at)}</span>
             <span>{article.page_count || 0} 页</span>
           </div>
         </div>
+        <div className="realshit-feed__chev" aria-hidden>
+          →
+        </div>
       </button>
-
-      <div className="article-card__footer">
-        <span>
-          <MessageCircle size={14} />
-          {article.comment_count || 0} 评论
-        </span>
-        {article.download_url ? (
-          <a href={article.download_url} className="download-link" target="_blank" rel="noreferrer">
-            <Download size={14} />
-            下载 PDF
-          </a>
-        ) : (
-          <span className="download-link disabled">
-            <Download size={14} />
-            PDF 未就绪
-          </span>
-        )}
-      </div>
-    </article>
+      <a
+        className="realshit-feed__source"
+        href={sourceArticleUrl}
+        target="_blank"
+        rel="noreferrer"
+        title="在 shitspace.xyz 打开同一篇"
+      >
+        <ExternalLink size={14} aria-hidden />
+        源站
+      </a>
+    </div>
   )
 }
 
-export function FermentationPage() {
+export function RealShitPage() {
   const [filters, setFilters] = useState({
-    zone: 'latrine',
-    tag: '',
     search: '',
   })
   const [page, setPage] = useState(1)
@@ -178,12 +177,10 @@ export function FermentationPage() {
         page_size: '10',
       })
 
-      if (filters.zone) query.set('zone', filters.zone)
-      if (filters.tag) query.set('tag', filters.tag)
       if (filters.search.trim()) query.set('search', filters.search.trim())
 
       const [articlesResponse, statsResponse] = await Promise.all([
-        fetch(`/api/articles?${query.toString()}`, { signal: controller.signal }),
+        fetch(`/api/realshit?${query.toString()}`, { signal: controller.signal }),
         fetch('/api/stats', { signal: controller.signal }),
       ])
 
@@ -191,7 +188,14 @@ export function FermentationPage() {
       const statsPayload = await statsResponse.json()
 
       setArticles(articlesPayload.data || [])
-      setMeta(articlesPayload.meta || { page: 1, total_pages: 0, total: 0 })
+      const total = Number(articlesPayload.count ?? 0)
+      const totalPages = Number(articlesPayload.total_pages ?? 0)
+      const currentPage = Number(articlesPayload.page ?? page)
+      setMeta({
+        page: currentPage,
+        total_pages: totalPages,
+        total,
+      })
       setStats(statsPayload.data || null)
       setLoading(false)
     }
@@ -223,10 +227,8 @@ export function FermentationPage() {
     }
   }
 
-  const heading = zoneLabels[filters.zone] || 'S.H.*.T Space / 文章镜像'
-
   return (
-    <div className="page-shell">
+    <div className="page-shell page-shell--realshit">
       <header className="topbar">
         <div className="topbar__inner">
           <button type="button" className="icon-link">
@@ -269,106 +271,65 @@ export function FermentationPage() {
         <Megaphone size={16} />
         <span>公告</span>
         <p>
-          启动后会同步最近 5 天的文章，并在每次同步时清理超出时效的 PDF。新闻与培养皿使用更长保留窗口（见同步结果中的 content_crawl_window_days）。
+          构石页与源站{' '}
+          <a href="https://shitspace.xyz/realshit" target="_blank" rel="noreferrer">
+            shitspace.xyz/realshit
+          </a>{' '}
+          同源；镜像列表为 <code className="notice-bar__code">GET /api/realshit</code>
+          （字段对齐源站 <code className="notice-bar__code">/api/articles?tag=hardcore</code>
+          ）。正文走本地 PDF 页图；可点「源站」对照。
         </p>
       </div>
 
       <main className="content">
-        <div className="breadcrumb">Home &gt; Fermentation / 发酵区</div>
+        <div className="breadcrumb">Home &gt; Real Shit / 构石</div>
 
-        <section className="hero-section">
-          <div className="hero-copy">
-            <h1>{heading}</h1>
-            <p>
-              站点以源 PDF 为基底生成高分辨率页图预览，并提供重新拼接后的 PDF 下载。
+        <section className="realshit-hero" aria-labelledby="realshit-heading">
+          <div className="realshit-hero__intro">
+            <p className="realshit-hero__kicker">COLUMN / 栏目</p>
+            <h1 id="realshit-heading">REAL SHIT</h1>
+            <p className="realshit-hero__zh">构石</p>
+            <p className="realshit-hero__lead">
+              列表由后端 <code>GET /api/realshit</code> 提供，语义等同源站严谨论证（
+              <code>tag=hardcore</code>），按通过时间倒序、每页 10 条。点击标题本地阅图；双列发酵区请前往{' '}
+              <Link to="/fermentation">FERMENTATION / 发酵区</Link>。
             </p>
             <div className="hero-chips">
-              <span className="pill">当前筛选：{tagOptions.find((item) => item.value === filters.tag)?.label || '全部标签'}</span>
-              <span className="pill">文章抓取：最近 {stats?.scheduler?.crawl_window_days || 5} 天</span>
-              <span className="pill">
-                新闻/培养皿：最近 {stats?.scheduler?.content_crawl_window_days ?? 30} 天
-              </span>
-              <span className="pill">
-                {stats?.scheduler?.background_sync_interval_seconds > 0
-                  ? `定时同步：每 ${Math.round(stats.scheduler.background_sync_interval_seconds / 60)} 分钟`
-                  : '定时同步：已关闭'}
-              </span>
-              <span className="pill">库内文章：{meta.total}</span>
+              <span className="pill realshit-pill">Truth Fades, S.H.*.T Lasts.</span>
+              <span className="pill">{TAG_LABEL}</span>
+              <span className="pill">库内严谨论证：{meta.total} 篇</span>
             </div>
           </div>
-
-          <div className="hero-clock">
-            <span>公网时间</span>
-            <strong>{formatClock(clock)}</strong>
-            <div className="hero-clock__meta">
-              <Clock3 size={14} />
-              <span>{formatDateTime(stats?.overview?.latest_crawl_at)}</span>
-            </div>
-          </div>
-        </section>
-
-        <section className="dashboard-strip">
-          <div className="dashboard-card">
-            <span>文章总数</span>
-            <strong>{stats?.overview?.article_count ?? 0}</strong>
-            <p>已完成索引的文章数量</p>
-          </div>
-          <div className="dashboard-card">
-            <span>页图总量</span>
-            <strong>{stats?.overview?.page_count ?? 0}</strong>
-            <p>按需渲染的总页数参考值</p>
-          </div>
-          <div className="dashboard-card">
-            <span>PDF 可下载</span>
-            <strong>{stats?.overview?.pdf_ready_count ?? 0}</strong>
-            <p>已完成拼接并可直接下载</p>
-          </div>
-          <div className="dashboard-card accent">
-            <span>同步状态</span>
-            <strong>{stats?.scheduler?.running ? '同步中' : '空闲'}</strong>
-            <p>
-              上次完成于 {formatDateTime(stats?.scheduler?.last_finished_at || stats?.overview?.latest_crawl_at)}
+          <aside className="realshit-hero__aside">
+            <strong>READING DESK / 阅读台</strong>
+            <p className="realshit-hero__aside-meta">
+              不在此页提供「欢乐鉴语」切换，与源站构石一致。若本地篇数少于源站，多为同步时间窗内尚未抓取；可点「立即同步」或调大后端抓取窗口。
             </p>
-          </div>
+            <div className="realshit-hero__clock">
+              <span>时间</span>
+              <strong>{formatClock(clock)}</strong>
+            </div>
+            <p className="realshit-hero__sync">
+              <Clock3 size={14} aria-hidden />
+              上次索引 {formatDateTime(stats?.overview?.latest_crawl_at)}
+            </p>
+          </aside>
         </section>
 
-        <section className="workspace">
+        <section className="workspace workspace--realshit">
           <aside className="control-panel">
             <div className="control-panel__box">
               <div className="control-panel__title">
                 <Sparkles size={16} />
-                <span>筛选与同步</span>
+                <span>构石 · 检索与同步</span>
               </div>
-              <div className="filter-group">
-                {zoneOptions.map((option) => (
-                  <button
-                    key={option.value || 'all-zone'}
-                    type="button"
-                    className={filters.zone === option.value ? 'filter-chip active' : 'filter-chip'}
-                    onClick={() => {
-                      setPage(1)
-                      setFilters((current) => ({ ...current, zone: option.value }))
-                    }}
-                  >
-                    {option.label}
-                  </button>
-                ))}
-              </div>
-              <div className="filter-group">
-                {tagOptions.map((option) => (
-                  <button
-                    key={option.value || 'all-tag'}
-                    type="button"
-                    className={filters.tag === option.value ? 'filter-chip alt active' : 'filter-chip alt'}
-                    onClick={() => {
-                      setPage(1)
-                      setFilters((current) => ({ ...current, tag: option.value }))
-                    }}
-                  >
-                    {option.label}
-                  </button>
-                ))}
-              </div>
+              <p className="realshit-panel__hint">
+                数据来自 <code>GET /api/realshit</code>，与{' '}
+                <a href="https://shitspace.xyz/realshit" target="_blank" rel="noreferrer">
+                  源站构石
+                </a>{' '}
+                列表语义一致（严谨论证）。
+              </p>
               <label className="search-box">
                 <Search size={16} />
                 <input
@@ -389,19 +350,32 @@ export function FermentationPage() {
 
             <div className="control-panel__box muted">
               <span className="mini-label">说明</span>
-              <p>当前并不是抓网页预览缩略图，而是从源 PDF 重新高倍率渲染。原站未暴露整页原始图片资源时，这是更清晰也更稳定的方式。</p>
+              <p>
+                文章抓取窗口：最近 {stats?.scheduler?.crawl_window_days || 5} 天。若列表为空，请先点「立即同步」或等待后台任务。
+              </p>
             </div>
           </aside>
 
-          <section className="listing-panel">
+          <section className="listing-panel listing-panel--realshit">
             {loading ? (
               <div className="empty-state">正在读取本地镜像数据…</div>
             ) : articles.length === 0 ? (
-              <div className="empty-state">当前筛选条件下没有文章。</div>
+              <div className="empty-state">
+                时间窗内没有严谨论证稿件。请先同步，或到{' '}
+                <Link to="/fermentation">发酵区</Link> 浏览全部标签。
+              </div>
             ) : (
-              <div className="articles-grid">
+              <div className="realshit-feed" role="list">
                 {articles.map((article) => (
-                  <ArticleCard key={article.id} article={article} onSelect={openArticle} />
+                  <RealShitRow
+                    key={article.id}
+                    article={article}
+                    onSelect={openArticle}
+                    zoneLabel={zoneLabels[zoneKey(article)] || zoneKey(article) || '未分区'}
+                    disciplineLabel={
+                      disciplineLabels[article.discipline] || article.discipline || '未标注'
+                    }
+                  />
                 ))}
               </div>
             )}
@@ -460,10 +434,7 @@ export function FermentationPage() {
         </div>
       </footer>
 
-      <ArticleDetailModal
-        article={selectedArticle}
-        onClose={() => setSelectedArticle(null)}
-      />
+      <ArticleDetailModal article={selectedArticle} onClose={() => setSelectedArticle(null)} />
     </div>
   )
 }

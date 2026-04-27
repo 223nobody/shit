@@ -1,6 +1,7 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { HomePage } from './pages/HomePage'
 import { FermentationPage } from './pages/FermentationPage'
+import { RealShitPage } from './pages/RealShitPage'
 import { ContentPage } from './pages/ContentPage'
 import './App.css'
 
@@ -9,6 +10,7 @@ function App() {
     <BrowserRouter>
       <Routes>
         <Route path="/" element={<HomePage />} />
+        <Route path="/realshit" element={<RealShitPage />} />
         <Route path="/fermentation" element={<FermentationPage />} />
         <Route path="/content/:type" element={<ContentPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />

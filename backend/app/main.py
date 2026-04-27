@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import os
+import time
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from threading import Lock, Thread
 from typing import Any
 
@@ -9,12 +12,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 
 from .crawler import (
-    DEFAULT_CRAWL_WINDOW_DAYS,
     DEFAULT_RENDER_SCALE,
+    REALSHIT_LIST_QUERY,
+    CrawlResult,
     crawl_articles,
     get_article_pdf_path,
     list_article_comments,
     load_article_comments,
+    prune_old_articles_and_pdfs,
     render_article_page_png,
 )
 from .content_crawler import (
@@ -23,26 +28,53 @@ from .content_crawler import (
     get_content,
     get_content_stats,
     list_contents,
+    prune_old_contents,
 )
 from .home_crawler import (
+    EDITORIAL_CONTENT,
+    HomeDataResult,
     crawl_homepage_data,
     get_homepage_data,
     save_homepage_data,
 )
-from .db import get_connection, init_db
+from .db import (
+    DEFAULT_CONTENT_CRAWL_WINDOW_DAYS,
+    DEFAULT_CRAWL_WINDOW_DAYS,
+    get_connection,
+    init_db,
+)
 
+# 后台定时全量同步间隔（秒）。环境变量 BACKGROUND_SYNC_INTERVAL_SECONDS=0 可关闭。
+DEFAULT_BACKGROUND_SYNC_INTERVAL_SEC = 15 * 60
 
 sync_lock = Lock()
 startup_sync_thread: Thread | None = None
+periodic_sync_thread: Thread | None = None
 sync_state: dict[str, Any] = {
     "running": False,
-    "mode": "startup_and_manual",
+    "mode": "startup_manual_periodic",
     "crawl_window_days": DEFAULT_CRAWL_WINDOW_DAYS,
+    "content_crawl_window_days": DEFAULT_CONTENT_CRAWL_WINDOW_DAYS,
+    "background_sync_interval_seconds": DEFAULT_BACKGROUND_SYNC_INTERVAL_SEC,
     "last_started_at": None,
     "last_finished_at": None,
     "last_result": None,
     "last_error": None,
 }
+
+# shitspace.xyz/realshit 同源列表参数（源站 GET /api/articles?tag=hardcore&page_size=10）
+REALSHIT_TAG = "hardcore"
+REALSHIT_PAGE_SIZE = 10
+
+
+def background_sync_interval_sec() -> int:
+    raw = os.environ.get("BACKGROUND_SYNC_INTERVAL_SECONDS")
+    if raw is None or str(raw).strip() == "":
+        return DEFAULT_BACKGROUND_SYNC_INTERVAL_SEC
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return DEFAULT_BACKGROUND_SYNC_INTERVAL_SEC
 
 
 def article_page_url(article_id: str, page_number: int, scale: float = 1.0) -> str:
@@ -55,10 +87,32 @@ def current_utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _empty_article_crawl_result(crawl_window_days: int) -> CrawlResult:
+    t = current_utc_iso()
+    return CrawlResult(
+        requested_pages=0,
+        fetched_pages=0,
+        fetched_articles=0,
+        saved_articles=0,
+        regenerated_articles=0,
+        rendered_pages=0,
+        generated_pdfs=0,
+        saved_comments=0,
+        pruned_articles=0,
+        deleted_pdfs=0,
+        source_total_count=0,
+        source_total_pages=0,
+        crawl_window_days=crawl_window_days,
+        cutoff_at=t,
+        crawled_at=t,
+    )
+
+
 def run_sync_job(
     max_pages: int | None = None,
     render_scale: float = DEFAULT_RENDER_SCALE,
     crawl_window_days: int = DEFAULT_CRAWL_WINDOW_DAYS,
+    content_crawl_window_days: int = DEFAULT_CONTENT_CRAWL_WINDOW_DAYS,
 ) -> dict[str, Any]:
     if not sync_lock.acquire(blocking=False):
         raise RuntimeError("sync already running")
@@ -67,39 +121,64 @@ def run_sync_job(
     sync_state["last_started_at"] = current_utc_iso()
     sync_state["last_error"] = None
     sync_state["crawl_window_days"] = crawl_window_days
+    sync_state["content_crawl_window_days"] = content_crawl_window_days
+    sync_state["background_sync_interval_seconds"] = background_sync_interval_sec()
+    errors: list[str] = []
     try:
-        # 爬取文章
-        article_result = crawl_articles(
-            max_pages=max_pages,
-            render_scale=render_scale,
-            crawl_window_days=crawl_window_days,
-        )
-        
-        # 爬取内容 (news, questions)
-        content_results = crawl_all_content(
-            max_pages=max_pages,
-            crawl_window_days=crawl_window_days,
-        )
-        
-        # 爬取首页数据
-        home_result = crawl_homepage_data()
-        save_homepage_data(home_result)
-        
+        try:
+            article_result = crawl_articles(
+                max_pages=max_pages,
+                render_scale=render_scale,
+                crawl_window_days=crawl_window_days,
+                list_queries=[{}, REALSHIT_LIST_QUERY],
+            )
+        except Exception as exc:
+            errors.append(f"articles: {exc}")
+            article_result = _empty_article_crawl_result(crawl_window_days)
+
+        content_results: dict[str, Any] = {}
+        pruned_contents = 0
+        try:
+            content_results = crawl_all_content(
+                max_pages=max_pages,
+                crawl_window_days=content_crawl_window_days,
+            )
+            cutoff_contents = datetime.now(timezone.utc) - timedelta(
+                days=content_crawl_window_days
+            )
+            pruned_contents = prune_old_contents(cutoff_contents)
+        except Exception as exc:
+            errors.append(f"contents: {exc}")
+
+        home_result: HomeDataResult
+        try:
+            home_result = crawl_homepage_data()
+            save_homepage_data(home_result)
+        except Exception as exc:
+            errors.append(f"homepage: {exc}")
+            home_result = HomeDataResult(
+                articles=[],
+                news=[],
+                questions=[],
+                editorial=EDITORIAL_CONTENT,
+                crawled_at=current_utc_iso(),
+            )
+
         result = {
             "articles": article_result.__dict__,
             "contents": {k: v.__dict__ for k, v in content_results.items()},
+            "pruned_contents": pruned_contents,
             "homepage": {
                 "articles_count": len(home_result.articles),
                 "news_count": len(home_result.news),
                 "questions_count": len(home_result.questions),
                 "crawled_at": home_result.crawled_at,
             },
+            "errors": errors,
         }
         sync_state["last_result"] = result
+        sync_state["last_error"] = "; ".join(errors) if errors else None
         return result
-    except Exception as exc:
-        sync_state["last_error"] = str(exc)
-        raise
     finally:
         sync_state["running"] = False
         sync_state["last_finished_at"] = current_utc_iso()
@@ -122,10 +201,45 @@ def ensure_startup_sync_started() -> None:
     startup_sync_thread.start()
 
 
+def periodic_sync_loop() -> None:
+    while True:
+        interval = background_sync_interval_sec()
+        if interval <= 0:
+            return
+        time.sleep(interval)
+        try:
+            run_sync_job()
+        except RuntimeError:
+            pass
+        except Exception as exc:
+            print(f"Periodic sync error: {exc}")
+
+
+def ensure_periodic_sync_started() -> None:
+    global periodic_sync_thread
+    if background_sync_interval_sec() <= 0:
+        return
+    if periodic_sync_thread and periodic_sync_thread.is_alive():
+        return
+    periodic_sync_thread = Thread(
+        target=periodic_sync_loop,
+        name="shitspace-periodic-sync",
+        daemon=True,
+    )
+    periodic_sync_thread.start()
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_db()
+    sync_state["background_sync_interval_seconds"] = background_sync_interval_sec()
+    cutoff_at = datetime.now(timezone.utc) - timedelta(days=DEFAULT_CRAWL_WINDOW_DAYS)
+    prune_old_articles_and_pdfs(cutoff_at)
+    prune_old_contents(
+        datetime.now(timezone.utc) - timedelta(days=DEFAULT_CONTENT_CRAWL_WINDOW_DAYS)
+    )
     ensure_startup_sync_started()
+    ensure_periodic_sync_started()
     yield
 
 
@@ -148,12 +262,18 @@ def sync_articles(
     max_pages: int | None = Query(default=None, ge=1, le=100),
     render_scale: float = Query(default=DEFAULT_RENDER_SCALE, ge=1.0, le=5.0),
     crawl_window_days: int = Query(default=DEFAULT_CRAWL_WINDOW_DAYS, ge=1, le=30),
+    content_crawl_window_days: int = Query(
+        default=DEFAULT_CONTENT_CRAWL_WINDOW_DAYS,
+        ge=1,
+        le=120,
+    ),
 ) -> dict[str, Any]:
     try:
         result = run_sync_job(
             max_pages=max_pages,
             render_scale=render_scale,
             crawl_window_days=crawl_window_days,
+            content_crawl_window_days=content_crawl_window_days,
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -211,6 +331,54 @@ def list_articles(
             "total": total,
             "total_pages": total_pages,
         },
+    }
+
+
+@app.get("/api/realshit")
+def list_realshit(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=REALSHIT_PAGE_SIZE, ge=1, le=50),
+    search: str | None = None,
+) -> dict[str, Any]:
+    """
+    构石（realshit）列表：与 shitspace.xyz/realshit 相同的数据源语义
+    （源站为 GET /api/articles?tag=hardcore&page_size=10），响应顶层字段对齐 count / page / total_pages。
+    """
+    conditions: list[str] = ["tag = ?"]
+    params: list[Any] = [REALSHIT_TAG]
+    if search:
+        conditions.append("(title LIKE ? OR author_name LIKE ?)")
+        params.extend([f"%{search}%", f"%{search}%"])
+
+    where_clause = f"WHERE {' AND '.join(conditions)}"
+    offset = (page - 1) * page_size
+
+    with get_connection() as connection:
+        total_row = connection.execute(
+            f"SELECT COUNT(*) AS total FROM articles {where_clause}",
+            params,
+        ).fetchone()
+        rows = connection.execute(
+            f"""
+            SELECT *
+            FROM articles
+            {where_clause}
+            ORDER BY datetime(COALESCE(approved_at, created_at)) DESC
+            LIMIT ? OFFSET ?
+            """,
+            [*params, page_size, offset],
+        ).fetchall()
+
+    total = int(total_row["total"]) if total_row else 0
+    total_pages = (total + page_size - 1) // page_size if total else 0
+    return {
+        "status": "success",
+        "data": [hydrate_realshit_list_item(row) for row in rows],
+        "count": total,
+        "page": page,
+        "total_pages": total_pages,
+        "page_size": page_size,
+        "source_equivalent": "GET https://shitspace.xyz/api/articles/?tag=hardcore&page_size=10",
     }
 
 
@@ -370,6 +538,7 @@ def hydrate_article_summary(row: dict[str, Any]) -> dict[str, Any]:
         "zone": row["zone"],
         "created_at": row["created_at"],
         "approved_at": row["approved_at"],
+        "source_updated_at": row.get("source_updated_at"),
         "rating_count": row["rating_count"],
         "avg_score": row["avg_score"],
         "comment_count": row["comment_count"],
@@ -378,6 +547,35 @@ def hydrate_article_summary(row: dict[str, Any]) -> dict[str, Any]:
         "download_url": f"/api/articles/{article_id}/download" if row["generated_pdf_path"] else None,
         "comments_url": f"/api/articles/{article_id}/comments",
         "crawled_at": row["crawled_at"],
+    }
+
+
+def hydrate_realshit_list_item(row: dict[str, Any]) -> dict[str, Any]:
+    summary = hydrate_article_summary(row)
+    article_id = summary["id"]
+    author_name = summary["author_name"]
+    return {
+        "title": summary["title"],
+        "tag": summary["tag"],
+        "topic": "default",
+        "discipline": summary["discipline"],
+        "id": article_id,
+        "zones": summary["zone"],
+        "status": "passed",
+        "rating_count": int(summary["rating_count"] or 0),
+        "avg_score": float(summary["avg_score"] or 0),
+        "comment_count": int(summary["comment_count"] or 0),
+        "created_at": summary["created_at"],
+        "updated_at": summary.get("source_updated_at") or summary["created_at"],
+        "approved_at": summary["approved_at"],
+        "author": {
+            "display_name": author_name,
+            "avatar_url": None,
+        },
+        "cover_image_url": summary["cover_image_url"],
+        "download_url": summary["download_url"],
+        "comments_url": summary["comments_url"],
+        "page_count": summary["page_count"],
     }
 
 

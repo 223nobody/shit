@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useLocation } from 'react-router-dom'
 import { Search, Menu, ChevronRight, Star, MessageCircle } from 'lucide-react'
 import '../App.css'
 
@@ -32,6 +32,7 @@ function StarRating({ score, count }) {
 export function HomePage() {
   const [data, setData] = useState(null)
   const [loading, setLoading] = useState(true)
+  const location = useLocation()
 
   useEffect(() => {
     async function loadData() {
@@ -58,43 +59,57 @@ export function HomePage() {
   // questions data is fetched but not displayed in current layout
   // const questions = data?.questions || []
 
+  const path = location.pathname
+
   return (
     <div className="page-shell homepage">
-      {/* Header */}
-      <header className="topbar home-topbar">
+      <header className="topbar">
         <div className="topbar__inner">
           <button type="button" className="icon-link">
             <Menu size={18} />
-            <span>菜单</span>
+            <span>MENU</span>
           </button>
-          <Link to="/" className="brandmark home-brand">
-            <span className="brand-main">S.H.*.T</span>
-            <span className="brand-sub">Sciences · Humanities · Information · Technology</span>
+          <Link to="/" className="brandmark">
+            <span className="brandmark__main">S.H.*.T</span>
+            <span className="brandmark__sub">Sciences · Humanities · Information · Technology</span>
           </Link>
           <div className="topbar__actions">
             <button type="button" className="icon-button" aria-label="搜索">
               <Search size={18} />
             </button>
-            <button type="button" className="login-button home-login">
+            <button type="button" className="login-button">
               LOG IN / 登录
             </button>
           </div>
         </div>
-        <nav className="navstrip home-nav">
-          <Link to="/" className="active">HOME</Link>
-          <Link to="/content/news">NEWS / 新闻</Link>
-          <Link to="/content/questions">PETRI DISH / 培养皿</Link>
-          <Link to="/fermentation">FERMENTATION / 发酵区</Link>
+        <nav className="navstrip">
+          <Link to="/" className={path === '/' ? 'active' : ''}>
+            HOME
+          </Link>
+          <Link to="/content/news" className={path.startsWith('/content/news') ? 'active' : ''}>
+            NEWS / 新闻
+          </Link>
+          <Link to="/content/questions" className={path.startsWith('/content/questions') ? 'active' : ''}>
+            PETRI DISH / 培养皿
+          </Link>
+          <Link to="/realshit" className={path === '/realshit' ? 'active' : ''}>
+            REALSHIT / 构石
+          </Link>
+          <Link to="/fermentation" className={path === '/fermentation' ? 'active' : ''}>
+            FERMENTATION / 发酵区
+          </Link>
         </nav>
       </header>
 
-      {/* Hero Section */}
-      <section className="hero-banner">
-        <div className="hero-logo">
+      <section className="hero-banner hero-banner--masthead" aria-label="Slogan">
+        <div className="hero-banner__rule" aria-hidden />
+        <div className="hero-logo" aria-hidden>
           <div className="logo-icon">▲</div>
         </div>
-        <h1 className="hero-quote">"Truth Fades, S.H.*.T Lasts."</h1>
-        <p className="hero-subquote">"真理易逝，构石永恒。"</p>
+        <p className="hero-kicker">S.H.*.T SPACE · MANIFESTO</p>
+        <h1 className="hero-quote">&ldquo;Truth Fades, S.H.*.T Lasts.&rdquo;</h1>
+        <p className="hero-subquote">&ldquo;真理易逝，构石永恒。&rdquo;</p>
+        <div className="hero-banner__rule hero-banner__rule--bottom" aria-hidden />
       </section>
 
       {/* Main Content */}
@@ -199,34 +214,26 @@ export function HomePage() {
         </section>
       </main>
 
-      {/* Footer */}
-      <footer className="home-footer">
-        <div className="footer-content">
-          <div className="footer-brand">
-            <div className="footer-logo">▲ S.H.*.T SPACE</div>
-            <p className="footer-tagline">SCIENCES · HUMANITIES · INFORMATION · TECHNOLOGY</p>
-            <p className="footer-desc">没有头衔通行证，没有权威裁决席。观点先于身份，发酵权属于所有人。</p>
-          </div>
-          <div className="footer-links">
-            <div className="footer-column">
-              <h4>GUIDELINES / 指南</h4>
-              <a href="/">Acceptance Criteria</a>
-              <a href="/">Submission Restrictions</a>
-            </div>
-            <div className="footer-column">
-              <h4>ABOUT / 关于</h4>
-              <a href="/">About S.H.*.T</a>
-              <a href="/">Contact</a>
-              <a href="/">Feedback</a>
-              <a href="/">System Status</a>
-            </div>
-          </div>
+      <footer className="site-footer">
+        <div className="site-footer__brand">
+          <div className="footer-logo">▲ S.H.*.T SPACE</div>
+          <p className="site-footer__eyebrow">SCIENCES · HUMANITIES · INFORMATION · TECHNOLOGY</p>
+          <p>没有头衔通行证，没有权威裁决席。观点先于身份，发酵权属于所有人。</p>
         </div>
-        <div className="footer-bottom">
-          <span>© 2024 S.H.*.T Space. All rights reserved.</span>
-          <div className="footer-legal">
-            <a href="/">PRIVACY POLICY / 隐私政策</a>
-            <a href="/">TERMS OF SERVICE / 服务条款</a>
+        <div className="site-footer__columns">
+          <div>
+            <h2>NAVIGATE / 导航</h2>
+            <Link to="/fermentation">Fermentation / 发酵区</Link>
+            <Link to="/content/news">News / 新闻</Link>
+            <Link to="/content/questions">Petri Dish / 培养皿</Link>
+            <Link to="/realshit">Real Shit / 构石</Link>
+          </div>
+          <div>
+            <h2>SOURCE / 源站</h2>
+            <a href="https://shitspace.xyz" target="_blank" rel="noreferrer">
+              shitspace.xyz
+            </a>
+            <Link to="/">Mirror home / 镜像首页</Link>
           </div>
         </div>
       </footer>

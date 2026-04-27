@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
-import { useParams, useNavigate } from 'react-router-dom'
-import { Sparkles, Search, ChevronLeft, ChevronRight, Clock } from 'lucide-react'
+import { useParams, Link, useLocation } from 'react-router-dom'
+import { Sparkles, Search, ChevronLeft, ChevronRight, Clock, Menu } from 'lucide-react'
 import { ContentCard } from '../components/ContentCard'
 import { ContentModal } from '../components/ContentModal'
 
@@ -30,7 +30,8 @@ function formatDateTime(value) {
 
 export function ContentPage() {
   const { type } = useParams()
-  const navigate = useNavigate()
+  const location = useLocation()
+  const path = location.pathname
   const [items, setItems] = useState([])
   const [meta, setMeta] = useState({ page: 1, total_pages: 0, total: 0 })
   const [page, setPage] = useState(1)
@@ -52,6 +53,17 @@ export function ContentPage() {
         if (search.trim()) query.set('search', search.trim())
 
         const response = await fetch(`/api/content/${type}?${query.toString()}`)
+        if (!response.ok) {
+          console.error(
+            'Content API error:',
+            response.status,
+            response.statusText,
+            type,
+          )
+          setItems([])
+          setMeta({ page: 1, total_pages: 0, total: 0 })
+          return
+        }
         const payload = await response.json()
         setItems(payload.data || [])
         setMeta(payload.meta || { page: 1, total_pages: 0, total: 0 })
@@ -85,19 +97,39 @@ export function ContentPage() {
     <div className="page-shell">
       <header className="topbar">
         <div className="topbar__inner">
-          <button type="button" className="icon-link" onClick={() => navigate('/')}>
-            <span>← 返回</span>
+          <button type="button" className="icon-link">
+            <Menu size={18} />
+            <span>MENU</span>
           </button>
-          <a href="/" className="brandmark">SH*T</a>
+          <Link to="/" className="brandmark">
+            <span className="brandmark__main">S.H.*.T</span>
+            <span className="brandmark__sub">Sciences · Humanities · Information · Technology</span>
+          </Link>
           <div className="topbar__actions">
-            <button type="button" className="login-button">LOG IN / 登录</button>
+            <button type="button" className="icon-button" aria-label="搜索">
+              <Search size={18} />
+            </button>
+            <button type="button" className="login-button">
+              LOG IN / 登录
+            </button>
           </div>
         </div>
         <nav className="navstrip">
-          <a href="/">HOME</a>
-          <a href="/content/news" className={type === 'news' ? 'active' : ''}>NEWS / 新闻</a>
-          <a href="/content/questions" className={type === 'questions' ? 'active' : ''}>PETRI DISH / 培养皿</a>
-          <a href="/">FERMENTATION / 发酵区</a>
+          <Link to="/" className={path === '/' ? 'active' : ''}>
+            HOME
+          </Link>
+          <Link to="/content/news" className={path.startsWith('/content/news') ? 'active' : ''}>
+            NEWS / 新闻
+          </Link>
+          <Link to="/content/questions" className={path.startsWith('/content/questions') ? 'active' : ''}>
+            PETRI DISH / 培养皿
+          </Link>
+          <Link to="/realshit" className={path === '/realshit' ? 'active' : ''}>
+            REALSHIT / 构石
+          </Link>
+          <Link to="/fermentation" className={path === '/fermentation' ? 'active' : ''}>
+            FERMENTATION / 发酵区
+          </Link>
         </nav>
       </header>
 

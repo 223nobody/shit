@@ -13,6 +13,12 @@ PDF_DIR = MEDIA_DIR / "pdfs"
 LEGACY_IMAGE_DIR = MEDIA_DIR / "articles"
 DB_PATH = DATA_DIR / "shitspace.db"
 
+# 文章（含 PDF）爬取与清理窗口：体积大，默认保留较短。
+DEFAULT_CRAWL_WINDOW_DAYS = 5
+
+# 新闻 / 培养皿等 contents：源站更新频率低，与文章共用 5 天时列表常为空。
+DEFAULT_CONTENT_CRAWL_WINDOW_DAYS = 60
+
 EXPECTED_ARTICLE_COLUMNS = {
     "id",
     "title",
